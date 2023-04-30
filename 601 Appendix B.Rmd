@@ -1,0 +1,224 @@
+---
+title: "Appendix"
+description: "Connecticut Real Estate Sales Data"
+author: "Joseph Farrell"
+date: "`r Sys.Date()`"
+output: 
+  distill::distill_article:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+##Appendix 
+
+__Below is the code up to line 132 in FINAL PAPER DOC__
+```{r}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(mosaic)
+library(ggplot2)
+library(lubridate)
+library(xts)
+library(formattable)
+library(forecast)
+library(kableExtra)
+library(plotly)
+library(gapminder)
+library(gganimate)
+library(gifski)
+library(png)
+
+connecticut <- read_csv("/Users/nelsonfarrell/Downloads/Real_Estate_Sales_2001-2019_GL.csv")
+county_town <- read_csv(("/Users/nelsonfarrell/Documents/501 Stats/Connecticut County:Towns.csv"))
+county_town <- county_town %>%
+  select("subregion", "town")
+
+connecticut <- rename(connecticut, "town" = "Town")
+
+connecticut <- 
+  left_join(connecticut, county_town, by = "town")
+
+connecticut <- select(connecticut, 
+                      "List Year", 
+                      "Date Recorded", 
+                      "town", 
+                      "Assessed Value", 
+                      "Sale Amount",
+                      "Residential Type",
+                      "subregion")
+
+connecticut <- connecticut %>%
+  na.omit(`Residential Type`)
+
+connecticut <- rename(connecticut, 
+                      "list_year" = "List Year", 
+                      "sale_date" = "Date Recorded", 
+                      "assessed_price" = "Assessed Value", 
+                      "sale_price" = "Sale Amount",
+                      "property_type" = "Residential Type", 
+                      "county" = "subregion")
+
+connecticut$sale_date <- as_date(connecticut$sale_date, 
+                                 format = "%m/%d/%Y")
+connecticut <- connecticut %>%
+  mutate(sale_year = year(sale_date))
+
+```
+
+
+__Examine Counts in relation to year__
+```{r}
+connecticut %>%
+  group_by(sale_year) %>%
+  count(sale_year) %>%
+  mutate("Proportion of Total" = n/548175) %>%
+  mutate(across(contains("Proportion"), round, 2)) %>%
+  rename("Sale Year" = "sale_year", 
+         "Properties Sold" = "n") %>%
+  knitr::kable(align = c("l", "c", "r"),
+               caption = "Number of Properties Sold Each Year ") %>%
+  kable_material(bootstrap_options = c("striped", "hover"), full_width = T) %>%
+  row_spec(1:6, background = "yellow") 
+```
+
+```{r}
+connecticut %>%
+  group_by(sale_year) %>%
+  ggplot(aes(x = sale_year)) +
+  geom_bar(fill = "steelblue")
+```
+
+The table and the bar graph display the scope of the data. While there are potenitally enough observations 
+to keep the year 2006 (10,977 observations); it is still considerablly less than the years following. The minimum year
+total after 2006 is 2011 (28,892 observations) which makes up approxiamtely 5% of the data. 2006 only makes up 2%.
+
+As a result of the data prior to and including 2006 being very limited, I will remove all observations prior to 2007.
+
+__Remove observations prior to 2006 and including 2006__
+```{r}
+connecticut <- connecticut %>%
+  filter(sale_year > 2006)
+```
+
+## Distribution of Sale Price
+
+__Get summary statistics of `assessed_price` and `sale_price`__
+```{r}
+summarize(connecticut,
+          "Mean Sale Price" = mean(sale_price),
+          "Median Sale Price" = median(sale_price),
+          "Standard Deviation Sale Price" = sd(sale_price))
+```
+
+__View favstats of `sale_price`__
+```{r}
+options(scipen = 999) # remove scientific notation
+favstats(~sale_price, data = connecticut)
+```
+
+__View summary statistics of different `residential_types`__
+```{r}
+connecticut %>%
+  group_by(property_type) %>%
+  summarize("Mean Sale Price" = mean(sale_price),
+            "Median Sale Price" = median(sale_price),
+            "Standard Deviation Sale Price" = sd(sale_price)) %>%
+  rename("Proerty Type" = "property_type") %>%
+  knitr::kable(caption = "Distribution of Sale Price") %>%
+  kable_material(full_width = T)
+  
+  
+```
+
+__View distribution of `sale price`, check for outliers__
+```{r}
+connecticut %>%
+  group_by(property_type) %>%
+  ggplot(aes(x = property_type, 
+             y = sale_price)) +
+  geom_violin(notch = TRUE) +
+  labs(title = "Distribution of Sale Price for Residential Types",
+       x = "Property Type",
+       y = "Sale Price") +
+  theme_light()
+```
+
+* The violin plots reveal that the data is heavily skewed to the right.
+* The summary statistics reveal very high standard deviations, 
+  and medians and means that are not close in value.
+* For these reasons I will effectively use trimmed mean as a measure of central 
+  tendency but I will actually remove the highest and lowest 2.5% of 
+  observations (sale_price). 
+
+__Remove top and bottom 2.5% of "sale_price"__
+```{r}
+connecticut <- connecticut %>%
+  filter(sale_price < quantile(connecticut$sale_price, .975) & 
+           sale_price > quantile(connecticut$sale_price, .025)) 
+537181-509278
+```
+
+ 
+ __View favstats of `sale_price` after being trimmed__  
+```{r}
+favstats(~sale_price, data = connecticut)
+```
+
+* Here we see that standard has been reduced from $608,700 to $216,198.4 indicating
+  that the dispersion has been decreased.
+* The mean reduced from $339,121.6 to $283,812. and is now closer to the median.
+* The minimum has increased from $0 to $33,697, and the maximum has decreased from 
+  $157,000,000 to $1,449,000 indicating the removal of at least some the most
+  extreme outliers.
+* Trimming the top and bottom 2.5% removed a total of 27,903 observations.
+  
+  __View distribution after trimming the top and bottom 2.5%__
+```{r}
+connecticut %>%
+  group_by(property_type) %>%
+  ggplot(aes(x = property_type, 
+             y = sale_price)) +
+  geom_violin(aes(fill = property_type), notch = TRUE) +
+  labs(title = "Distribution of Sale Price for Residential Types",
+       x = "Residential Type",
+       y = "Sale Price") +
+  theme_light()
+```
+
+__Counts of "Sale Price" facet wrapped by ""Property Type"__
+```{r}
+connecticut %>%
+  ggplot(aes(x=sale_price, fill = property_type)) +
+    geom_histogram(binwidth = 200000) +
+    labs(title = "Distribution of Sale Price: Residential Type",
+         ylab = "Count",
+         xlab = "Sale Price") +
+    theme_bw() +
+    facet_wrap(vars(property_type), 
+               scales = "free_y", 
+                        "free_x")
+```
+* These graphics display a distribution that is still skewed to the right but
+  that is more normally distributed than it was prior to being trimmed.
+
+__Counts of "Sale Price" facet wrapped by ""Property Type"__
+```{r}
+connecticut %>%
+  ggplot(aes(x=sale_price)) +
+    geom_histogram(binwidth = 50000, fill = "steelblue") +
+    labs(title = "Distribution of Sale Price",
+         y = "Count",
+         x = "Sale Price") +
+    theme_bw() 
+```
+
+
+

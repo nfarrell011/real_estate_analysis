@@ -1,0 +1,950 @@
+---
+title: "Final Project: DACSS 601"
+description: "Connecticut Real Estate Sales Analysis"
+author: "Joseph Farrell"
+date: "`r Sys.Date()`"
+output: 
+  distill::distill_article:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries
+
+```{r}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(mosaic)
+library(ggplot2)
+library(lubridate)
+library(formattable)
+library(forecast)
+library(kableExtra)
+library(plotly)
+library(gapminder)
+library(gganimate)
+library(gifski)
+library(png)
+library(ggfortify)
+library(tidyquant)
+library(tidycensus)
+library(ggstatsplot)
+library(scales)
+library(feasts)
+library(tsibble)
+library(readxl)
+```
+
+## Introduction
+
+The following is an analysis of Connecticut real estate sales data. The data set used in this analysis contains 930,621 observations (transactions) and contains data from 2005-2020. There are 14 variables in the original data set. Not all observations and variables will be pertinent to answering the research questions and will be subsequently filtered out. The research questions this analysis will attempt to answer or at least provide insights into answering are:
+
+* Where in Connecticut are properties values the highest?
+* Are property values in the Connecticut increasing or decreasing?
+* Where are property values increasing/decreasing?
+* What is driving sale price?
+
+## Read in Data
+
+I will read in two data sets that will be joined and used for the analysis.
+  
+* **Connecticut** contains Connecticut real estate sales data from 2005-2020. 
+* **County_town** contains a list of Connecticut counties, and the towns that are in each county. This latter data set will be useful for grouping in the analysis. As will be displayed later, many of the towns contain limited      observations so an alternative grouping option will be useful.
+
+```{r}
+getwd()
+connecticut <- read_csv("/Users/nelsonfarrell/Documents/601 DACSS/Real_Estate_Sales_2001-2020_GL.csv")
+county_town <- read_csv(("/Users/nelsonfarrell/Documents/501 Stats/Connecticut County:Towns.csv"))
+county_town <- county_town %>%
+  select("subregion", 
+         "town")
+```
+
+## Data Cleaning
+
+__Rename "Town" variable "town" to join datasets__
+```{r}
+connecticut <- rename(connecticut, 
+                      "town" = "Town")
+head(county_town)
+head(connecticut)
+```
+Here I am changing the name of the "Town" variable in the Connecticut data set so it will match the "town" variable in the county_town data set. 
+
+__Join datasets__
+```{r}
+connecticut <- 
+  left_join(connecticut, 
+            county_town, 
+            by = "town")
+```
+Here I am joining the data sets, this will be useful when grouping in the analysis.
+
+__Remove columns that will not be used in the analysis__
+```{r}
+connecticut <- select(connecticut, 
+                      "List Year", 
+                      "Date Recorded", 
+                      "town",
+                      "Sale Amount",
+                      "Residential Type",
+                      "subregion")
+```
+Here I have removed the columns "Serial number", "Non Use Code", "Assessor Remarks", "Sales Ratio", "Property Type", "Location", "Assessed Value", and "OPM Remarks". These removed columns do not appear to be essential to the current analysis.
+
+__Remove NAs from "Residential Type"__
+```{r}
+connecticut <- connecticut %>%
+  na.omit(`Residential Type`)
+```
+The NAs removed here are simply nonresidential properties, which will not be part of the analysis.
+
+__Rename columns without spaces and for clarity__
+```{r}
+connecticut <- rename(connecticut, 
+                      "list_year" = "List Year", 
+                      "sale_date" = "Date Recorded", 
+                      "sale_price" = "Sale Amount",
+                      "property_type" = "Residential Type", 
+                      "county" = "subregion")
+```
+In addition to removing spaces from the column names, I have renamed residential type "property type" as there are no longer non-residential properties, this naming scheme is more intuitive. 
+
+__Convert "sale_date" from character to date and create new column "sale_year"__
+```{r}
+connecticut$sale_date <- as_date(connecticut$sale_date, 
+                                 format = "%m/%d/%Y")
+connecticut <- connecticut %>%
+  mutate(sale_year = year(sale_date))
+
+```
+Here I have converted the "sale_date" column to date format and extracted the sale year and put it in a new column. I thought this would be useful when making visualizations. It turned out to be less useful than anticipated because the new column was being treated as a numeric variable (I couldn't figure out how to make R treat just the year as a date, I'm sure it's possible) in the visualizations. This caused the visualizations to display, for example, "2015.5" which is nonsensical. I also ended up wanting to group by month on some occasions, so I ended using this new column and the floor_date() function.
+
+__Remove all observations prior to 2007__
+```{r}
+connecticut <- connecticut %>%
+  filter(sale_year > 2006)
+```
+The data prior to and including 2006 is very limited. As a result, I have removed all observations prior to 2007.
+
+* See appendix **Part A** for justification.
+
+__Remove top and bottom 2.5% of "sale_price"__
+```{r}
+connecticut <- connecticut %>%
+  filter(sale_price < quantile(connecticut$sale_price, 
+                               .975) & 
+           sale_price > quantile(connecticut$sale_price, 
+                                 .025)) 
+```
+The data was heavily skewed to the right, with extreme outliers in the right direction which impacted the measure of central tendency (mean). This skewed distribution would also impact statistical analyses later in the analysis. After trimming the data it is still skewed to the right but not as heavily, and is approximately normally distributed.
+
+* See appendix **Part B** for justification.
+
+__View data set following cleaning__
+```{r}
+str(connecticut)
+```
+After cleaning the data set we are left with seven variables (columns):
+
+* **list_year**: This is a numeric variable. This is the year that the property was listed (i.e., when the property was put up for sale).
+* **sale_date**: This is a date variable. This is the date that the property was actually sold.
+* **town**: This is a nominal character variable. This is the town where the property is located.
+* **county**: This is a nominal character variable. This is the county where the property is located. 
+* **sale_price**: This is a numeric variable. This is the price that property sold for.
+* **property_type**: This is nominal character variable. This is the type of property (i.e., condo, single family, two family, etc.)
+* **sale_year**: This is a numeric variable. This is the year the property was sold.
+
+Now that we have cleaned the data we can take a look at some statewide figures so we can get a general idea of the state of the real estate market in Connecticut.
+
+## Statewide Data
+
+__Line graph: Statewide mean__
+```{r}
+connecticut %>%
+  group_by(year = lubridate::floor_date(sale_date, 
+                                        "year")) %>%
+  summarize(mean_year = mean(sale_price),
+            sd = sd(sale_price),
+            n = n()) %>%
+  mutate("se" = sd/sqrt(n)) %>%
+  mutate(min = mean_year - (sd/sqrt(n) * qt(.025, 
+                                       (n-1), 
+                                       lower.tail = FALSE)),
+         max = mean_year + (sd/sqrt(n) * qt(.025, 
+                                       (n-1), 
+                                       lower.tail = FALSE))) %>%
+  ggplot(aes(year)) +
+  geom_ribbon(aes(ymin = min, 
+                  ymax = max), 
+              fill = "rosybrown",
+              alpha = 1) +
+  geom_line(aes(x = year, 
+                y = mean_year)) +
+  ggtitle("Overall Mean Sale Price of Connecticut Properties: 2007-2020",
+          subtitle = "With a 95% Confidence Interval") +
+  ylab("Sale Price") +
+  xlab("Year") +
+  theme_update()
+```
+Here we can observe the behavior of the overall mean sale price of properties in Connecticut from 2007 to 2020. As expected the mean price decreased sharply following the 2008 financial crisis and appears to have bottomed out and stabilized around 2008-9. From 2009 to 2019, there does not appear to be a lot change in the overall mean sale price. Then in 2019 the average price begins to increase sharply. Geom_ribbon() in this graphic displays a 95% confidence interval using the standard error and a t-distribution (df = n - 1). All subsequent confidence intervals are calculated in a similar manner.
+
+__Linegrpah of the mean yearly sale price grouped by property type__
+```{r fig.height=8}
+mean_property_type <-connecticut %>%
+  group_by(year = floor_date(sale_date, "year"), 
+           property_type) %>%
+  summarize(mean = mean(sale_price))
+
+mean_property_type <-ggplot(mean_property_type, 
+              aes(year, 
+                  mean, 
+                  color = property_type)) +
+  geom_line() +
+  transition_reveal(year) +
+  labs(title = 'Mean Sale Price: Year {frame_along}',
+       subtitle = "Grouped By Property Type",
+       x = "Year",
+       y = "Price ($)") +
+  guides(color = guide_legend(title = "Property Type"))
+
+ 
+animate(mean_property_type)
+```
+This graphic displays the mean monthly sale price of all properties in Connecticut grouped by the type of property. Interestingly, single family homes have the highest mean sale price. This graphic was made using gganimate() for aesthetic purposes. We can get a closer look with a 95% confidence interval below.
+
+__Scatterplot of yearly mean sale price for each "Property Type"__
+```{r}
+options(scipen = 999) # remove scientific notation
+connecticut %>%
+  group_by(property_type, 
+           year = lubridate::floor_date(sale_date, "year")) %>%
+  summarize(mean_year = mean(sale_price),
+            sd = sd(sale_price),
+            n = n()) %>%
+  mutate(min = mean_year - (sd/sqrt(n) * qt(.025, 
+                                       (n-1), 
+                                       lower.tail = FALSE)),
+         max = mean_year + (sd/sqrt(n) * qt(.025, 
+                                       (n-1), 
+                                       lower.tail = FALSE))) %>%
+  ggplot(aes(x = year, 
+             y = mean_year, 
+             group = property_type)) +
+  geom_ribbon(aes(ymin = min, 
+                  ymax = max), 
+              fill = "grey",
+              alpha = 1) +
+  geom_point((aes(color = property_type))) +
+  ggtitle("Yearly Mean Sale Price: Property Types",
+          subtitle = "With 95% Confidence Interval") +
+  ylab("Mean Sale Price ($)") +
+  xlab("Year") +
+  theme_linedraw() +
+  facet_wrap(vars(property_type)) +
+  guides(color = guide_legend(title = "Property Type"))
+```
+Overall, this graphic demonstrates that the behavior of the mean sale price is different for different property types. The graphic shows that multi-unit properties appear to have started increasing in value earlier than single family properties (i.e., condo and single family). The mean sale price of condos has remained largely constant. Single family properties appear to have been constant right up until 2020 when they experienced a rapid increase. This aligns with the well documented housing boom that resulted from the Covid-19 pandemic. Four family properties appear to be increasing the fastest, but also appear to be the most volatile (further demonstrated by the width of the 95% CI). Two and three family properties appear to have started increasing directly after the crash of 2008 and appear to have been steadily increasing ever since. Before we can continue the analysis we will have to examine the counts of the different property types.
+
+## Counts
+
+Here we will examine the counts of the different property types in the data set.
+
+__View Counts of Property types__
+```{r}
+connecticut %>%
+  count(property_type) %>%
+  mutate("Proportion"= percent(n/sum(n))) %>%
+  rename("Property Type" = "property_type") %>%
+  rename("Number of Properties Sold" = "n") %>%
+  kbl() %>%
+  kable_material(c("striped", 
+                   "hover"))
+```
+Here we can see the number of observations, and the proportions of each "property type" in the dataset. We can see that majority of the observations are "Single Family" and "Condo." The least represented group is "Four Family" with only 1985 observations across all towns in Connecticut over the 14 years of the data. This partially explains the apparent volatility in the mean sale price of "Four Family" properties displayed in the previous visualization. This will become more impactful as we continue the analysis. Once we start looking at individual counties (and potentially towns) there will be very limited data on any property type other than "single family."
+
+For a full exploration of property type counts see appendix **Part C**
+
+For the next part of the analysis we will focus on "Single Family" properties. Not only do they account for the majority of our observations, but the price of "Single Family" properties is potentially more interesting to more people.
+
+## County Mean
+
+In this section we will look at where property values are the highest. We will also try to establish if there is a significant difference in the behavior the mean sale price of "Single Family" properties in different Connecticut counties.
+
+__Read in map data__
+```{r}
+con_map <- map_data("county", 
+         "connecticut")
+```
+This data set contains latitude and longitude data that can be used to make a map visualization.
+
+__Rename "subregion" "county" to join "con_map" with "connecticut"__
+```{r}
+con_map <- rename(con_map,
+                  "county" = "subregion")
+```
+The "subregion" in the "con_map" data set is Connecticut counties so I will rename the variable so I can join it with the sales data.
+
+__Create object "map_vis": grouping by county and creating a "county_mean" column__
+```{r}
+map_vis <- connecticut %>%
+  group_by(county, 
+           property_type) %>%
+  summarize(county_mean = mean(sale_price)) %>%
+  filter(property_type == "Single Family")
+```
+This object contains the mean sale price of each county in Connecticut and will be joined with the map data to display the mean sale price on a map.
+
+__Join "mapping" object with "con_map" data__
+```{r}
+map_vis <- inner_join(map_vis, 
+                      con_map, 
+                      by = "county")
+```
+This object will be used to create a map visualization displaying county mean sale price.
+
+__Create object to use when labeling the counties on the map__
+```{r}
+county_names <- aggregate(cbind(long, 
+                                lat) ~ county, 
+                          data=map_vis, 
+                    FUN=function(x)mean(range(x)))
+```
+This creates an object that will center the name of the county inside that county on the map visualization.
+
+__Create map of Connecticut counties displaying the mean sale price of residential properties__
+```{r}
+ggplot(map_vis, 
+       aes(x = long, 
+           y = lat)) +
+  geom_polygon(aes(fill = county_mean, 
+                   group = county)) +
+  geom_text(data = county_names, 
+            aes(long, 
+                lat, 
+                label = county), 
+                size =3) +
+  scale_fill_gradient(low = "steelblue3", 
+                      high = "steelblue4", 
+                      name = "Average Sale Price (USD)") +
+  ggtitle("Overall Average Sale Price of Single Family Properties",
+          subtitle = "Connecticut Counties from 2007-2020") +
+  theme_light()
+```
+Here we can get a visualization of where in Connecticut (grouped by county) "Single Family" property values are the highest. Not surprisingly, the area closest to New York City appears to have the highest property value.
+
+__Create map displaying change in mean sale price from 2008 to 2020__
+```{r}
+connecticut %>%
+  group_by(county, 
+           property_type, 
+           sale_year) %>%
+  summarize(mean_sale_price = mean(sale_price)) %>%
+  select(county,
+         property_type,
+         sale_year, 
+         mean_sale_price) %>%
+  filter(sale_year == "2008" | 
+         sale_year =="2020") %>%
+  filter(property_type == "Single Family") %>%
+  pivot_wider(names_from = sale_year, 
+              values_from = mean_sale_price) %>%
+  mutate(delta_mean = (`2020` - `2008`)) %>%
+  mutate(delta_mean_percent = (delta_mean/`2008`)) %>%
+  inner_join(con_map, 
+             by = "county") %>%
+  ggplot(aes(x = long, 
+             y = lat)) +
+  geom_polygon(aes(fill = delta_mean_percent*100, 
+                   group = county)) +
+  geom_text(data = county_names, 
+            aes(long, 
+                lat, 
+                label = county), 
+                size = 3) +
+  scale_fill_gradient(low = "steelblue3", 
+                      high = "steelblue4", 
+                      name = "Percent Change") +
+  ggtitle("Percent Change of Single Family Property Sale Price",
+          subtitle = "Connecticut Counties: 2008 to 2020") +
+  theme_light()
+```
+Here we can an idea of where geographically the mean sale price has increased the most since 2008. Different start years produce different results. I chose 2008 because it is essentially where the mean sale price bottomed out following the financial crisis. These geographic representations help put in to context other numeric graphics that will follow. You may also notice that the code for this graphic is a single chunk. I only learned how to do this as the semester went on. I left the first map graphic the way I originally created it because that allowed to explain the steps more easily.
+
+__Create table of change in mean sale price in Connecticut counties__
+```{r}
+connecticut %>%
+  group_by(county, 
+           property_type, 
+           sale_year) %>%
+  summarize(mean_sale_price = mean(sale_price)) %>%
+  select(county,
+         property_type,
+         sale_year, 
+         mean_sale_price) %>%
+  filter(sale_year == "2008" | 
+         sale_year =="2020") %>%
+  filter(property_type == "Single Family") %>%
+  pivot_wider(names_from = sale_year, 
+              values_from = mean_sale_price) %>%
+  mutate(delta_mean_ID = (`2020` - `2008`)) %>%
+  mutate(delta_mean_percent = scales::percent(delta_mean_ID/`2008`, accuracy = .01)) %>%
+  mutate(across(contains("ID"), round, 2)) %>%
+  arrange(desc(delta_mean_percent)) %>%
+  rename("County" = "county",
+         "Mean 2008" = "2008",
+         "Mean 2020" = "2020",
+         "Change in Mean ($)" = "delta_mean_ID",
+         "Change in Mean (%)" = "delta_mean_percent") %>%
+  mutate(County = str_to_title(County)) %>%
+  formattable(align = c("l", 
+                        "c", 
+                        "r"),
+              list(`Mean 2020` = FALSE,
+                   `Mean 2008` = FALSE,
+                   `property_type` = FALSE,
+                   `Change in Mean (%)` = formatter("span", 
+                 style = ~ formattable::style(color = ifelse(`Change in Mean (%)` < 0, 
+                                                "firebrick", 
+                                                "forestgreen")),
+                 ~ icontext(sapply(`Change in Mean (%)`, 
+                                   function(x) if (x < 0) "arrow-down" else if (x > 0) "arrow-up"), 
+                            `Change in Mean (%)`))))
+```
+This table displays numerically what we saw visually in the previous map graphic. The "Change in Mean" column here is obtained by subtracting the mean of "Single Family" properties sold in 2008 from the mean of "Single Family" properties sold in 2020. The "Change in Mean (%)" column is obtained by dividing the "Change in Mean" by the mean of 2008 and multiplying by 100. The previous and subsequent graphics are calculated in the same manner. 
+
+__Create bar graph displaying the change in mean sale price__
+```{r}
+connecticut %>%
+  group_by(county, 
+           property_type, 
+           sale_year) %>%
+  summarize(mean_sale_price = mean(sale_price),
+            properties_sold = count(county), 
+            sd = sd(sale_price)) %>%
+  select(county,
+         property_type,
+         sale_year, 
+         mean_sale_price) %>%
+  filter(sale_year == "2008" | sale_year =="2020") %>%
+  filter(property_type == "Single Family") %>%
+  pivot_wider(names_from = sale_year, values_from = mean_sale_price) %>%
+  mutate(delta_mean_ID = (`2020` - `2008`),
+         delta_mean_percent = (delta_mean_ID/`2008`*100)) %>%
+  mutate(across(contains("percent"), round, 2)) %>%
+  mutate(Color = ifelse(delta_mean_percent < 0, "rosybrown","steelblue")) %>%
+  mutate(county = str_to_title(county)) %>%
+  ggplot(aes(x = reorder(county, delta_mean_percent), 
+             y = delta_mean_percent, 
+             fill = Color)) +
+  geom_col()+
+  geom_text(aes(label = delta_mean_percent, 
+                vjust = 1.2),
+                size = 3) +
+  labs(title = "Percentage Change in Mean Sale Price",
+       subtitle = "Single Family Properties from 2008 to 2020",
+       x = "County Name",
+       y = "Percent Change") +
+  theme(axis.text.x = element_text(angle = 30, 
+                                   hjust = 1)) +
+  scale_fill_identity(guide = "none")
+```
+The above graphics display the change in mean sale price of "Single Family" properties from 2008 to 2020 in the eight Connecticut counties.
+
+These graphics display the same information in different ways. I thought it created a fuller understanding. These graphics demonstrate that there is a significant difference between counties in how the mean sale price of "Single Family" properties has behaved from 2008 to 2020. We can see that the mean sale price has increased the most in Litchfield County (21.85%), followed by Fairfield County (12.72%), and Windham County (12.14%). While purely speculative, this could be a result of people wanting to move out of metropolitan areas. This hypothesis will be explored later in the analysis.
+
+I had intended to come back and add the standard error to the above the graphics but the standard error for the difference between two means turned out to be more complicated to calculate than anticipated and I didn't have time at the end of semester to adjust the code to add the error. This a regrettable theme throughout the project. I left adding errors to a lot the graphics until the end of the semester and when they turned out be more challenging than anticipated to add, I ran out of time. As seen, I was able to add 95% confidence intervals to many of the graphics, but I intended to do more.
+
+__Create line graph of the mean sale price of single family properties in different counties__
+```{r}
+connecticut %>%
+  group_by(county, 
+           property_type, 
+           year = lubridate::floor_date(sale_date, "year")) %>%
+  filter(property_type == "Single Family") %>%
+  summarise(mean = mean(sale_price),
+            sd = sd(sale_price),
+            n = n()) %>%
+  mutate(min = mean - (sd/sqrt(n) * qt(.025, 
+                                       (n-1), 
+                                       lower.tail = FALSE)),
+         max = mean + (sd/sqrt(n) * qt(.025, 
+                                       (n-1), 
+                                       lower.tail = FALSE))) %>%
+  mutate(county = str_to_title(county)) %>%
+  ggplot(aes(x = year, 
+             y = mean)) +
+  geom_ribbon(aes(ymin = min, 
+                  ymax = max), 
+              fill = "rosybrown") +
+  geom_line(aes(color = county)) +
+  ggtitle("Mean Sale Price of Single Family Properties: Connecticut Counties",
+          subtitle = "With a 95% Confidence Interval") +
+  ylab("Sale Price") +
+  xlab("Year") +
+  theme_bw() +
+  facet_wrap(vars(county)) +
+  guides(color = "none")
+```
+Here we can see the behavior of the mean sale price of "Single Family" properties in the eight Connecticut counties over the 14 years of the data. We can see clearly that property values are the highest in Fairfield County, but we can also see that property values are increasing in a number of Connecticut counties. As mentioned, this increase appears most pronounced in Fairfield and Litchfield Counties. Windham County, which shows a 12.14% increase, appears to have started increasing prior to 2019, and has been increasing more steadily.
+  
+Next, we will shift our focus to potential drivers of sale price
+
+## What is driving price?
+
+### Number of Properties Sold
+
+__Scatterplot of the number of properties sold and mean sale price (both per month) facet wrapped by property types__
+```{r}
+connecticut %>%
+  group_by(month = floor_date(sale_date, 
+                              "month"), 
+           property_type) %>%
+  summarize(mean_price = mean(sale_price), 
+            count = count(month)) %>%
+  ggplot(aes(x = count, 
+             y = mean_price, 
+             color = property_type)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  ggtitle("Number of Properties Sold (Month) and Mean Sale Price",
+          subtitle = "Grouped by Property Type") +
+  xlab("Number of Properties Sold") +
+  ylab("Average Sale Price (Month") +
+  facet_wrap(vars(property_type), 
+             scales = "free") +
+  guides(color = "none")
+```
+Here we are looking the relationship between the number of properties sold and mean sales price. The number of properties sold in a given month is the x variable and mean sale price of that month is the y variable. This graphic demonstrates that there appears to be a weak to moderate positive linear relationship between the number of properties sold in a given month and the average sale price. This relationship appears positive to varying degrees for all property types.
+  
+Adhering to the theme of focusing on "Single Family" properties, we will take a closer look at this relationship as it relates to "Single Family" properties.
+
+__Line graph of mean sale price combined with bar graph of number of properties sold__
+```{r, fig.height = 6, fig.width = 10}
+connecticut %>%
+  group_by(property_type, 
+           month = floor_date(sale_date, 
+                              "month")) %>%
+  filter(property_type == "Single Family") %>%
+  summarize(mean = mean(sale_price),
+            properties_sold = count(month)) %>%
+  mutate(previous_mean = lag(mean)) %>%
+  mutate(previous_month = lag(month)) %>%
+  mutate(Direction = ifelse(properties_sold < lag(properties_sold), 
+                            "Decreasing Sales",
+                            "Increasing Sales")) %>%
+  mutate(Direction2 = ifelse(mean < lag(mean), 
+                             "Decreasing Price",
+                             "Increasing Price")) %>%
+  na.omit() %>% ##removes the first observations with no lag
+  ggplot(aes(month, mean, 
+              xend = previous_month,
+              yend = previous_mean)) +
+  geom_segment(aes(color = Direction2)) +
+  scale_color_manual("Direction of Change: Price", 
+                     values = c("Decreasing Price" = "rosybrown", 
+                                "Increasing Price" = "steelblue")) +
+  geom_col(aes(x = month, 
+               y = properties_sold*50, 
+               fill = Direction)) +
+  scale_fill_manual("Direction of Change: Volume", 
+                    values = c("Decreasing Sales" = "rosybrown", 
+                               "Increasing Sales" = "steelblue")) +
+  ggtitle("How Volume Impacts Price Movement") +
+  xlab("Time Grouped by Month") +
+  scale_y_continuous(name = "Average Sale Price ($)", 
+                     sec.axis = sec_axis(~./50, 
+                     name = "Number of Properties Sold"))
+
+```
+Here we can see the relationship graphed differently. The line graph is average sale price. The bar graph is the number of properties sold. The colors (blue and red) are representative of the direction of change. The bar is blue when the value (number of properties sold in a month) is higher than the value from the previous month. The bars are red when the value is lower than the previous value. The line portion behaves similarly, when the average price is higher than the previous price the line the is blue, when it is less, the line is red. This graphic demonstrates that as more properties are sold, price tends to go up. When the number of properties sold decreases, price tends to decrease. More properties sold indicates increased demand. 
+  
+Additionally, if you look closely at this graphic you may notice that there are approximately the same amount of the peeks and troughs as there are years in the data set. This indicates an element seasonality, where prices go up and down cyclically with the seasons. We will look at seasonality as potential price driver next.
+  
+First, we will look at the relationship between number of properties sold and average price statistically.
+
+__Looking at the relationship between mean sale price and number of properties sold statistically__
+```{r}
+options(scipen = 999) # remove scientific notation
+
+connecticut %>%
+  group_by(month = floor_date(sale_date, "month"), 
+           property_type) %>%
+  filter(property_type == "Single Family") %>%
+  summarize(mean_price = mean(sale_price), 
+            count = count(month), 
+            na.rm = TRUE) %>%
+  ggscatterstats(x = count, 
+                 y = mean_price) +
+  ggtitle("Relationship Between Count and Sale Price") +
+  xlab("Number of Properties Sold") +
+  ylab("Average Price ($)") +
+  theme(axis.text.x = element_text(angle = 30, 
+                                   hjust = 1))
+```
+Here we see the relationship displayed numerically as a correlation coefficient. The observed correlation coefficient is 0.46 (on a -1 to 1 scale). We are 95% confident that the true correlation coefficient is between (0.33 and 0.57). The p-value (which is essentially zero), reveals the probability of observing a sample like this or more extreme if there was no relationship between price and the number of properties sold.
+
+Next we will run a simple linear regression.
+
+See appendix **Part D** for conditions check of the linear model.
+
+__Linear model of the relationship between mean price and number of properties sold__
+```{r}
+lm1 <- connecticut %>%
+  group_by(month = floor_date(sale_date, 
+                              "month"), 
+           property_type) %>%
+  filter(property_type == "Single Family") %>%
+  summarize(mean_price = mean(sale_price), 
+            count = count(month))
+  
+lm2 <-lm(mean_price ~ count, data = lm1)
+
+summary(lm2)
+```
+
+Looking at the p-values from F-statistic and T-test (both approximately 0), we can see that the slope is significant and model is good. 
+
+However, looking at the coefficient of determination (Multiple R-squared), we can see that model does not fit particularly well. Our coefficient of determination is 0.2086 (on a 0 to 1 scale). The coefficient of determination tells us the proportion of the variability in the response variable that is explained by the explanatory variable. For a model to be said to fit well we would like to see $R^{2}$ above 0.75-0.80. This tells there is a high degree of variability around the regression line even though overall trend is statistically significant.
+
+We can conclude that the number properties sold does impact price, but it does not determine price. There are other factors involved. 
+
+Next we will explore a potentially related driver, seasons.
+
+### Seasonality 
+
+__Create line graph the of the mean sale price throughout the year__
+```{r}
+seasons_1 <- connecticut %>%
+  filter(sale_year != "2021") %>%
+  group_by(month = floor_date(sale_date,
+                              "month"),
+           year = floor_date(sale_date, 
+                            "year")) %>%
+  filter(property_type == "Single Family") %>%
+  summarize(mean = mean(sale_price)) %>%
+  mutate(Month2 = tsibble::yearmonth(month)) %>%
+  ungroup(month) %>%
+  select("Month2", 
+         "mean")
+
+seasons_1<- as_tsibble(seasons_1)
+seasons_1
+
+gg_season(seasons_1) +
+    ggtitle("Seasonal Variation of Average Sale Price") +
+    xlab("Months") +
+    ylab("Average Monthly Sale Price ($)") +
+    guides(color = guide_legend(title = "Years"))
+
+```
+This graphic displays how the mean sale price behaves throughout the year. We can clearly see an element of seasonality, where prices tend increase and decrease with the seasons. The graphic highlights that prices are at their highest in the summer, around June or July, and at their lowest in the winter, around January or February. This is sensical in a state like Connecticut where moving in the winter presents weather related challenges. This relates to the previous graphic in that seasons could be potentially be driving the number of properties sold and, to a degree, price. This information can be used differently for different groups. For buyers, this indicates they could potentially save money by buying in the winter. For a seller, this indicates that winter is not the optimal time for selling a property.
+
+* 2020 was removed from this graphic for aesthetic reasons. The dataset does not contain all twelve months of data
+  for 2020. The months that are contained follow a similar pattern
+
+__Average percent difference from February to July__
+```{r}
+feb <- connecticut %>%
+  group_by(month = floor_date(sale_date,
+                              "month"),
+           year = floor_date(sale_date, 
+                            "year")) %>%
+  filter(property_type == "Single Family") %>%
+  summarize(mean = mean(sale_price)) %>%
+  mutate(Month2 = tsibble::yearmonth(month)) %>%
+  ungroup(month) %>%
+  select("year",
+         "Month2", 
+         "mean") %>%
+  filter(str_detect(Month2, 'Feb')) 
+
+connecticut %>%
+  group_by(month = floor_date(sale_date,
+                              "month"),
+           year = floor_date(sale_date, 
+                            "year")) %>%
+  filter(property_type == "Single Family") %>%
+  summarize(mean = mean(sale_price)) %>%
+  mutate(Month2 = tsibble::yearmonth(month)) %>%
+  ungroup(month) %>%
+  select("year",
+         "Month2", 
+         "mean") %>%
+  filter(str_detect(Month2, 'Jul')) %>%
+  left_join(feb,
+            by = "year") %>%
+  mutate(`February to July` = (mean.x - mean.y)/mean.y*100) %>%
+  select("February to July") %>%
+  colMeans() %>%
+  kable(caption = "Average Seasonal Percent Difference", 
+        col.names = "Percent Difference", 
+        digits = 2) %>%
+  kable_classic_2("striped", 
+                  "hover") %>%
+  row_spec(1, 
+           bold = T,
+           background = "yellow")
+
+
+```
+This table show the average difference in mean sale price between February and July. The mean sale price of "Single Family" properties is, on average, 17.36% higher in July than it is in February.
+
+### Population 
+
+__Create line graph of the relationship between population and change in mean sale price__
+```{r}
+con_pop_town <- read_excel(("/Users/nelsonfarrell/Downloads/pop_towns2020.xlsx"),
+                       sheet = "Sheet2")
+ 
+con_pop_town <- con_pop_town %>%
+   rename("town" = "Town")
+   
+connecticut %>%
+   filter(sale_year > 2018) %>%
+   group_by(town, sale_year) %>%
+   summarise(mean = mean(sale_price), properties_sold = count(town)) %>%
+   mutate(previous = lag(mean),
+         change = (mean - previous),
+         percent_change = (change/previous) * 100) %>%
+  na.omit() %>%
+  filter(properties_sold > 30) %>%
+  left_join(con_pop_town, by = "town") %>%
+   rename("population" = "Est. Pop.",
+          "2019" = "previous",
+          "2020" = "mean") %>%
+     select(!"sale_year") %>%
+   na.omit() %>%
+   ggplot(aes(x = population, y = percent_change)) +
+   geom_point() +
+   geom_smooth(method = "lm") +
+  ggtitle("Population and Percent Change in Sale Price",
+          subtitle = "2019 to 2020") + 
+  xlab("Town Popualtion") +
+  ylab("Percent Change")
+```
+This graphic displays the relationship between the change in mean sale price from 2019 to 2020 and town population. Each dot represents the percent change in mean sale price of a specific town. The x-axis is the population and the y-axis is the percentage change. I saw numerous articles during the pandemic asserting that people were moving away from densely populated areas. I was curious to see if the data would support those claims. I have filtered out towns where less than thirty properties were sold in 2020 for reliability of the data. In reality, this removed only 12 observations and had no meaningful impact the graphic, at least visually.
+
+This is an interesting graphic. It shows that as population goes up there appears to be less variance in percentage change of mean sale price. As population goes down, some towns have experienced substantial increases while others substantial decreases. Generally speaking, the data does not appear to indicate that areas with smaller populations are experiencing mean price increases. Some are, and some are not. Once again, there are other factors involved. One could conclude from this graphic that you are unlikely to experience extreme volatility in areas with larger populations. With further analysis of other drivers impacting price in towns with smaller populations one could potential experience substantial property value increase. The apparent volatility could also be a function of number of properties sold, as smaller towns have less observations, each observation impacts the mean
+more heavily.
+
+We'll explore this next as we examine the relationship between price change and population from a different angle.
+
+__Create table of the towns with top ten percent change in mean sale price__
+```{r}
+connecticut %>%
+   filter(sale_year > 2018) %>%
+   filter(property_type == "Single Family") %>%
+   group_by(town, sale_year) %>%
+   summarise(mean = mean(sale_price), 
+             properties_sold = count(town), 
+             sd = sd(sale_price)) %>%
+   mutate(previous = lag(mean),
+         change = (mean - previous),
+         percent_change = (change/previous) * 100,
+         error = (sd/sqrt(properties_sold))/mean * 100) %>%
+  na.omit() %>%              #This removes the 2019 data that was used in computation 
+  filter(properties_sold > 30) %>%
+  left_join(con_pop_town, by = "town") %>%
+  rename("population" = "Est. Pop.") %>%
+  na.omit() %>%
+  arrange(desc(percent_change)) %>%
+  select("town",
+         "properties_sold",
+         "percent_change",
+         "error",
+         "population") %>%
+  ungroup %>%
+  add_row(town = "Statewide Town Averages", 
+          !!! colMeans(.[-1])) %>%
+  filter(row_number() < 11 | 
+         row_number() == 144) %>%
+  mutate(across(contains("percent"), 
+                round, 
+                2)) %>%
+  mutate(across(contains("op"), 
+                round, 
+                0)) %>%
+  mutate(across(contains("error"), 
+                round, 
+                2))%>%
+  rename("Town" = "town",
+         "Number of Properties Sold" = "properties_sold",
+         "Price Increase (%)" = "percent_change",
+         "Standard Error (%)" = "error",
+         "Population" = "population") %>%
+  kable(caption = "Towns with the Highest Percent Increase in Mean Sale Price and Thier Population") %>%
+  kable_classic_2("striped", "hover") %>%
+  row_spec(11, bold = T) %>%
+  footnote(general = "The town averages here are not the same as statewide figures. These are averages of towns totals, which weights each town equally and does not account for differences in observation totals.")
+
+```
+This tables gives us a different perspective on the relationship between mean sale price and population. This graphic lends supportive evidence to the claim that people moved away from densely populated areas which in turn drove up prices in more rural areas. This table shows the ten towns with highest percent increase in mean sale price from 2019 to 2020. All have populations below the statewide mean of 23,414 residents. More importantly, all have below 25,000 inhabitants. If we look at the number of properties sold column, which represents the year 2020, we can see that there appears to be an adequate amount of observations to discount the idea that these increases are a function of limited observations. We could further this line inquiry by also looking at number of properties sold, year over year, to see if more properties are being bought in rural areas and less in more urban areas. Unfortunately, as a result temporal constraints this is where is I have to leave it.
+
+The relationship between population and sale price has not been well established here. There are a number of conclusions one could draw: that the relationship needs to be further investigated, the exodus referred to in the media was sensationalized, or perhaps Connecticut cities are not big enough to feel the effects of an urban exodus. More analysis is needed.
+
+## Litchfield County
+
+### Delta mean
+
+__Create graphic of mean yearly sale price for just Litchfield County, group by property type__
+```{r}
+connecticut %>%
+  filter(county == "litchfield") %>%
+  group_by(property_type, 
+           year = lubridate::floor_date(sale_date, "year")) %>%
+  summarize(mean_litchfield = mean(sale_price)) %>%
+  ggplot(aes(x = year, 
+             y = mean_litchfield)) +
+  geom_line(aes(color = property_type)) +
+  geom_smooth() +
+  theme_bw() +
+  labs(title = "Mean Sale Price of Different Property Types",
+       subtitle = "Litchfield County 2008-2020", 
+       x = "Year", 
+       y = "Mean Sale Price ($)") +
+  facet_wrap(vars(property_type)) +
+  guides(color = "none")
+```
+This graphic displays the behavior of the mean sale price of the different "Property Types" in Litchfield County from 2008 to 2020. Similar to the statewide data it appears that multi unit properties (i.e., Four-Family, Three Family, etc.) are increasing at a faster rate than "Single Family" properties. "Four Family" properties appear to be the most volatile. We have to keep in mind what we observed earlier about our sample size with regards to multi unit properties, they constitute our smallest sample with limited observations.
+
+Next we examine the counts of property types in Litchfield County.
+
+### Counts
+  
+__Examine counts of property type in Litchfield County__
+```{r}
+Litchfield <- connecticut %>%
+  filter(county == "litchfield")
+```
+Here I have filtered for only the data in Litchfield County
+
+__Create table of counts of Three and Four Family properties sold each year in Litchfield__
+```{r}
+Litchfield %>%
+  filter(property_type == "Four Family" | property_type == "Three Family") %>%
+  group_by(sale_year) %>%
+  count(property_type)  %>%
+  pivot_wider(names_from = property_type, values_from = n) %>%
+  rename("Sale Year" = "sale_year") %>%
+  kable(align = c("l", "c", "r"), 
+               caption = "Counts of Four Family Properties Sold Each Year: Litchfield County") %>%
+  kable_classic(full_width = T) %>%
+  column_spec(1, bold = T) %>%
+  row_spec(0, bold = T) %>%
+  row_spec(5:7, background = "yellow") %>%
+  row_spec(14, background =  "yellow")
+```
+I have highlighted 2011-2013 and 2020 where there are very limited observations for both "Three" and "Four Family" properties. This is just reiteration of what was presented earlier. While the counts do increase in some of the years for "Three Family" properties the data does not appear reliable at even the county level. As a result of the limitations of the data examining different "property types" at or beyond the county level will not be revealing or possible.
+
+As we examine the towns in Litchfield County, we will again only be looking a "Single Family" properties.
+
+### Towns: Litchfield County
+
+__Filter Litchfield County Object for only "Single Family" properties__
+```{r}
+Litchfield %>%
+  filter(property_type == "Single Family") %>%
+  group_by(town, sale_year) %>%
+  summarise(mean = mean(sale_price)) %>%
+  pivot_wider(names_from = sale_year, values_from = mean) %>%
+  mutate("Delta" = (`2020`-`2008`)/`2008`*100) %>%
+  select("town",
+         "Delta") %>%
+  mutate(Color = ifelse(Delta < 0, "rosybrown","steelblue")) %>%
+  ggplot(aes(x = reorder(town, +Delta), 
+             y = Delta, 
+             fill = Color)) +
+  geom_col() +
+  labs(title = "Percentage Change in Mean Sale Price: 2008 to 2020",
+       subtitle = "Towns in Litchfield County, Connecticut",
+       x = "County Name",
+       y = "Percent Change",
+       caption = "**Data missing for Torrington 2020") +
+  theme(axis.text.x = element_text(angle = 45, 
+                                            hjust = 1)) +
+  scale_fill_identity(guide = "none")
+```
+This graphic displays the change in mean sale price in all the Litchfeild County towns from 2008 to 2020. We can see that Torrington has no data for a change in mean indicating that either 2008 or 2020 are missing. Goshen and Cornwall show a 116.77% and 54.03%. respectively. Increases of this magnitude seem potentially implausible. However, we saw earlier that Goshen experienced an approximately 40% increase in mean sale price from 2019 to 2020 and the counts appeared reliable. More analysis is needed. Another interesting takeaway is that while the aggregated data show that Litchfield County property values have increased the most, this is not true for all of Litchfield. By town, it appears that approximately half of Litchfield is increasing and the other half is not. We could postulate that the towns that have not seen an increase in mean sale price could be lagging behind and may in the future. We could also speculate that the higher property values in Fairfield County have caused people to the adjacent Litchfield to buy properties. This is all highly speculative and without further analysis and/or information nothing definitively actionable can be ascertained.
+    
+## Reflection
+
+This project has been a great experience. I made a lot of progress in R and thinking about data sets in different ways. My previous experience with R (or any coding language) was essentially zero. I had taken part of one free on-line class and basically learned how to install R and make a vector. This influenced my data set selection. I chose a relatively clean data set because I wanted to limit the, then unknown, challenges that were sure to arise during the course of the project. In a way I regret this decision, I think I could have become more proficient in data cleaning had I chosen a messier data set. I settled on the real estate sales data because I have always had in interest real estate and I thought it would be interesting data for my first analysis. 
+
+In the early stages of the project I was primarily performing exploratory analysis and practicing the skills we were learning in the tutorials, readings, classes, and the numerous rabbit holes I found myself going down. I experienced numerous challenges.
+
+The first challenge I faced was simply reading in the dataset, which was surprisingly difficult. Really, I faced challenges with almost every aspect of the project, but I enjoyed the process of figuring things out and learned a lot along the way. Ggplot, in general, was another early challenge. Not to imply that I have mastered ggplot, I still find it very challenging at times, but at the beginning I thought it was very confusing. My first visualizations were made in base R. Finally, I started to get the hang of how "aes" worked and what it meant. Slowly, I tried more complicated graphics. The map visualization was another one of my relatively early challenges. I could not, for so long, figure out how make it look like Connecticut. I read so many blogs and tried so many different approaches. This became a theme throughout the project, I would find myself fixated on certain things I wanted to do and would spend hours or days researching. This is partly because I have found R fascinating in its capabilities. The map visualization I had give up on for over week. I finally revisited it and was able figure it out. A lot of these early challenges were related to not understanding how R, or a certain function, was trying accomplish a task. As time went on, I started to understand, or at the very least began to understand how to find the answers to the questions I was asking.
+
+Other early, and not so early, challenges I had were with the computations I was trying to make, such as, change in mean, percent change, etc. I initially created new objects every time I made a computation and then joined the objects to make a visualization. Finally, I began to understand how to use the pivot functions and they turned out to be remarkably powerful. I know you had to told us this many times, but I was too intimidated to try and use them for a while. I just couldn't follow what they were doing at first. When I did finally start to understand I realized I could start with my original data set and essentially make all necessary computations by pivoting wider and then back to longer, or just leaving it in wide format. This understanding partially came about as began to think about data sets in different ways, and how they could be transformed to reveal different things. I made a lot progress in this regard, and specically with the pivot function. I left my first couple visualizations in thier original form (using different objects) because this offered an opportunity to explain what I was doing. My subsequent visualizations and tables I tried to code more ellegantly (at least from my perspective, which is assuming creating multiple objects is inellgent).
+
+Seperating strings was another challenge. Where I used this fucntion never made it into the project but I spent days working on it. I was able to seperate the strings the way wanted to but in a way that cannot possibly be the easiest or most advisable way. While I was looking into seperating strings I stumbled upon RegEx syntax. I should have asked about this in class but I never thought of it during class or didn't get the chance. Is using RegEx syntax the most effective way to seperate complicated strings? This is something I wish I needed to do more of in the course of the project because it seems like this would be something that comes up a lot in the real world.
+
+I could go on and on about specific challenges I faced throughout the project, suffice to say I found everyhing challenging, but in fun and exciting way. I enjoyed learning what R could do and discovering new functions and packages that helped me display my findings and answer the research questions.
+
+Actually answering the research questions was an overarching and elusive challenge. After a couple months of working on the project, while simultaneously learning R (so not purely focused on answering the research questions), I had not gained any insights into answering the research questions. I had a lot superficial descriptive stastitisics but I had not made any progress in understanding what was driving the price. You provided me with some ideas and this helped change my perspective on what I could actaully glean from the dataset. I realized that I could look a lot deeper than reporting mean and change in mean, and comparing types of properties and areas, which had been my original plan. Being introduced to the lead() and lag() functions (among others) was very helpful in this regard. This allowed me to look at the relationship between number of properties sold and sale price over time, which turned out to be revealing. It also highlighted seasonality, which I was aware of, but had not thought to visualize or highlight. This specific aspect of the project helped me to realize that as learned to think about the data differently and learned about different fucntions I could gain insights that I prevously didn't know was possible. It also revealed the shortcomings of my dataset. 
+
+Property value, and price behavior, is complicated with myriad drivers of varying degrees. If I was to continue, or if I was to start this project agian, I would not choose mean sale price as the comparative metric. There is too much variablity. I would want to use a more standardized metric, such as price per square foot. I would also want to get more information about the different towns and/or counties, such as school quality, green spaces, crimes rates, etc. I would also want to factor in interest rates and national trends. All of these things likely have a signifcant impact on sale price and it would interesting to explore the strength of these relationships. If I was continuing with just this data set, an Arima time series analysis could be potentially revealing and offer insights into future price behavior. I created a time series and forecasts with Auto Arima in one my earlier iterations but, despite spending copius amounts of time reading about time series analysis,  I did not feel confident enough to leave it in the final project. 
+
+As the semester ended and I was trying explore price drivers I wanted more demographic information about the areas in question. I attempted to connect to tidy census but that turned out to be too deep of a rabbit hole to go down with so little time left in the semester. I settled for population data from an excel document. This offered me opportunity to explore a potential driver and practice using excel documents, which I had never done because my original data set was CSV form. Reading in excel sheets after all I had learned did not turn out be the challenge I had anticipated. 
+
+## Conclusion 
+
+We can conclude from this analysis that mean sale price of properties in Connecticut is increasing, on average, statewide. This is not say that they are increasing everywhere. Some areas are experiencing increases and other decreases. We can conclude that within these overall and localized trends there is an element of seasonality. Seasons likely impact the number of properties sold which has been shown to have a statistically significant relationship to mean sale price. It is unclear whether population is impacting the mean sale price, but it seems possible. This analysis was able highlight what counties and towns have experienced the highest increase in mean sale price over the period of the data but it was unable to offer insights into if those trends will continue. More analysis on price drivers is nessacary to reach defintive conclusions about future price behavior. Alternatively, or congruently, an in depth Arima time series analyis could help accurately predict future price behavior. 
+
+## Bibliography
+
+Annual Population Estimates Data (2020). State of Connecticut, Deparment of Public Health. Retreived from https://portal.ct.gov/DPH/Health-Information-Systems--Reporting/Population/Annual-Town-and-County-Population-for-Connecticut
+
+C. Sievert. Interactive Web-Based Data Visualization with R, plotly, and shiny. Chapman and Hall/CRC Florida, 2020.
+
+Garrett Grolemund, Hadley Wickham (2011). Dates and Times Made Easy with lubridate. Journal of Statistical Software, 40(3), 1-25. URL https://www.jstatsoft.org/v40/i03/.
+
+H. Wickham. ggplot2: Elegant Graphics for Data Analysis. Springer-Verlag New York, 2016.
+
+Hadley Wickham, Jim Hester and Jennifer Bryan (2022). readr: Read Rectangular Text Data. R package version 2.1.2. https://CRAN.R-project.org/package=readr
+
+Hadley Wickham and Jennifer Bryan (2022). readxl: Read Excel Files. R package version 1.4.0. https://CRAN.R-project.org/package=readxl
+
+Hadley Wickham and Dana Seidel (2022). scales: Scale Functions for Visualization. R package version 1.2.0. https://CRAN.R-project.org/package=scales
+
+Hadley Wickham, Romain François, Lionel Henry and Kirill Müller (2022). dplyr: A Grammar of Data Manipulation. R package version 1.0.8. https://CRAN.R-project.org/package=dplyr
+
+Hao Zhu (2021). kableExtra: Construct Complex Table with 'kable' and Pipe Syntax. R package version 1.3.4. https://CRAN.R-project.org/package=kableExtra
+
+Jennifer Bryan (2017). gapminder: Data from Gapminder. R package version 0.3.0. https://CRAN.R-project.org/package=gapminder
+
+Jeroen Ooms (2022). gifski: Highest Quality GIF Encoder. R package version 1.6.6-1. https://CRAN.R-project.org/package=gifski
+
+Kun Ren and Kenton Russell (2021). formattable: Create 'Formattable' Data Structures. R package version 0.2.1. https://CRAN.R-project.org/package=formattable
+
+Matt Dancho and Davis Vaughan (2021). tidyquant: Tidy Quantitative Financial Analysis. R package version 1.0.3. https://CRAN.R-project.org/package=tidyquant
+
+Mitchell O'Hara-Wild, Rob Hyndman and Earo Wang (2021). feasts: Feature Extraction and Statistics for Time Series. R package version 0.2.2. https://CRAN.R-project.org/package=feasts
+
+Patil, I. (2021). Visualizations with statistical details: The 'ggstatsplot' approach. Journal of Open Source Software, 6(61), 3167, doi:10.21105/joss.03167
+
+Simon Urbanek (2013). png: Read and write PNG images. R package version 0.1-7. https://CRAN.R-project.org/package=png
+
+Thomas Lin Pedersen and David Robinson (2020). gganimate: A Grammar of Animated Graphics. R package version 1.0.7. https://CRAN.R-project.org/package=gganimate
+
+Wang, E, D Cook, and RJ Hyndman (2020). A new tidy data structure to support exploration and modeling of temporal data, Journal of Computational and Graphical Statistics, 29:3, 466-478,
+  doi:10.1080/10618600.2019.1695624.
+
+Wickham, H., & Grolemund, G. (2016). R for data science: Visualize, model, transform, tidy, and import data. OReilly Media. Retrieved from https://r4ds.had.co.nz/index.html
+
+Wickham et al., (2019). Welcome to the tidyverse. Journal of Open Source Software, 4(43), 1686, https://doi.org/10.21105/joss.01686
+
+Yuan Tang, Masaaki Horikoshi, and Wenxuan Li. "ggfortify: Unified Interface to Visualize Statistical Result of Popular R Packages." The R Journal 8.2 (2016): 478-489.
+Masaaki Horikoshi and Yuan Tang (2016). ggfortify: Data Visualization Tools for Statistical Analysis Results. https://CRAN.R-project.org/package=ggf
+
+Zaldonis, Pauline. "Real Estate Sales 2001-2019 GL" (2021), Office of Policy of Management. Retrieved from https://portal.ct.gov/OPM/IGPP-MAIN/Publications/Real-Estate-Sales-Listing
+
+
+
